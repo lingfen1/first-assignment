@@ -1,9 +1,4 @@
-/* =========================================
-   Activity Tracker Widget (atw)
-   File: activity-tracker.css
-   ========================================= */
-
-/* Base reset (scoped) */
+/* Activity Tracker: all widget styles live in this file (never injected by JS). */
 .atw,
 .atw * {
   box-sizing: border-box;
@@ -14,163 +9,128 @@
   right: 16px;
   bottom: 16px;
   z-index: 9999;
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
-    "Segoe UI Emoji";
-  line-height: 1.2;
+  width: min(340px, calc(100vw - 32px));
+  color: #e2e8f0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
 }
 
-/* Panel */
 .atw__panel {
-  width: 340px;
-  max-width: calc(100vw - 32px);
-  border-radius: 14px;
+  width: 100%;
   overflow: hidden;
-
-  background: #0f172a; /* slate-900 */
-  color: #e2e8f0; /* slate-200 */
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
-
-  transform-origin: bottom right;
+  color: inherit;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 14px;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 30%);
 }
 
-/* Open/Closed states */
-.atw__panel.is-closed {
-  /* keep compact look when timeline hidden */
-}
-
-.atw__panel.is-open {
-  /* same base, but gives room for timeline */
-}
-
-/* Header */
 .atw__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  gap: 10px;
+  padding: 12px;
+  background: #18243b;
+  border-bottom: 1px solid #334155;
 }
 
 .atw__title {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-weight: 700;
+  gap: 8px;
+  color: #f8fafc;
   font-size: 14px;
-  letter-spacing: 0.2px;
-  color: #f1f5f9; /* slate-100 */
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .atw__dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: #22c55e; /* green-500 */
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+  display: block;
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 0 3px rgb(74 222 128 / 15%);
 }
 
-/* Actions */
 .atw__actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .atw__btn {
   appearance: none;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(255, 255, 255, 0.06);
-  color: #e2e8f0;
-  border-radius: 10px;
+  display: inline-block;
   padding: 6px 10px;
+  color: #f8fafc;
+  background: #334155;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  font: inherit;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
+  line-height: 1.2;
   cursor: pointer;
-  user-select: none;
-  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+  transition: background-color 120ms ease;
 }
 
 .atw__btn:hover {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: rgba(148, 163, 184, 0.28);
-}
-
-.atw__btn:active {
-  transform: translateY(1px);
-}
-
-.atw__btn:focus {
-  outline: none;
+  background: #475569;
 }
 
 .atw__btn:focus-visible {
-  outline: 2px solid rgba(56, 189, 248, 0.7); /* sky-400 */
+  outline: 2px solid #7dd3fc;
   outline-offset: 2px;
 }
 
-/* Stats grid */
 .atw__stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  padding: 10px 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  padding: 11px;
 }
 
 .atw__stat {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 12px;
-  padding: 8px;
   min-width: 0;
+  padding: 8px 5px;
+  text-align: center;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 9px;
 }
 
 .atw__statLabel {
   display: block;
+  margin-bottom: 3px;
+  color: #cbd5e1;
   font-size: 11px;
-  opacity: 0.8;
-  color: #cbd5e1; /* slate-300 */
-  margin-bottom: 4px;
 }
 
 .atw__statValue {
   display: block;
+  color: #f8fafc;
   font-size: 14px;
-  font-weight: 800;
-  color: #f8fafc; /* slate-50 */
-  letter-spacing: 0.2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Timeline wrapper */
 .atw__timelineWrap {
-  border-top: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(2, 6, 23, 0.35); /* darker */
-  max-height: 280px;
-  overflow: auto;
+  max-height: 270px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: #101c30;
+  border-top: 1px solid #334155;
 }
 
-.atw__hidden {
+.atw__hidden,
+.atw__timelineWrap[hidden] {
   display: none !important;
 }
 
-/* Scrollbar (optional, safe) */
-.atw__timelineWrap::-webkit-scrollbar {
-  width: 10px;
-}
-.atw__timelineWrap::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.22);
-  border-radius: 999px;
-  border: 2px solid rgba(15, 23, 42, 0.9);
-}
-.atw__timelineWrap::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.7);
-}
-
-/* Timeline entries */
 .atw__timeline {
   display: flex;
   flex-direction: column;
@@ -179,66 +139,55 @@
 .atw__event {
   display: flex;
   gap: 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+  padding: 9px 12px;
+  border-bottom: 1px solid #293549;
 }
 
 .atw__event:last-child {
-  border-bottom: none;
+  border-bottom: 0;
 }
 
 .atw__eventTime {
-  min-width: 78px;
-  font-size: 11px;
-  opacity: 0.85;
+  flex: 0 0 72px;
   color: #cbd5e1;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding-top: 2px;
 }
 
 .atw__eventBody {
-  min-width: 0;
   flex: 1;
+  min-width: 0;
 }
 
 .atw__eventType {
-  display: inline-block;
+  color: #7dd3fc;
   font-size: 11px;
-  font-weight: 850;
+  font-weight: 750;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #38bdf8; /* sky-400 */
-  margin-bottom: 4px;
 }
 
 .atw__eventMeta {
-  font-size: 12px;
+  margin-top: 2px;
   color: #e2e8f0;
-  opacity: 0.95;
-  word-break: break-word;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
-/* Make it slightly nicer on very small screens */
 @media (max-width: 420px) {
   .atw {
     right: 10px;
     bottom: 10px;
-  }
-
-  .atw__panel {
-    width: 320px;
-    max-width: calc(100vw - 20px);
-    border-radius: 12px;
+    width: min(320px, calc(100vw - 20px));
   }
 
   .atw__stats {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .atw__eventTime {
-    min-width: 70px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-/* Optional: reduce motion */
 @media (prefers-reduced-motion: reduce) {
   .atw__btn {
     transition: none;

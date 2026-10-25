@@ -1,431 +1,366 @@
+/**
+ * Activity Tracker Widget
+ * Tracks page views, meaningful clicks, and form submissions across demo pages.
+ * All browser storage and DOM updates are owned by this class.
+ */
 class ActivityTracker {
+  /**
+   * The demo pages already call `new ActivityTracker()` in their own scripts.
+   * Returning the existing instance prevents duplicate listeners/page views while
+   * allowing this file to initialize itself on DOMContentLoaded as required.
+   * @param {{storageKey?: string, maxEvents?: number}} options
+   */
   constructor(options = {}) {
+    if (ActivityTracker.instance) return ActivityTracker.instance;
+
     this.storageKey = options.storageKey || "activity-tracker-data";
-    this.maxEvents = options.maxEvents || 200;
-
-    // State
-    this.data = this._load() || this._createNewSession();
+    this.maxEvents = Number.isSafeInteger(options.maxEvents) && options.maxEvents > 0
+      ? options.maxEvents
+      : 200;
+    this.visibleEvents = 50;
+    this.data = this._loadSession() || this._newSession();
+    this.isOpen = this.data.ui.open;
+    this.timelineNeedsRefresh = true;
     this.ui = null;
-    this.isOpen = this.data.ui?.open ?? false;
-    this.pageStartTime = Date.now();
+    this.durationTimer = null;
 
-    // Ensure session exists
-    if (!this.data.sessionId || !this.data.startedAt || !Array.isArray(this.data.events)) {
-      this.data = this._load() || this._createNewSession();
-      
-    }
-    const currentPage = this._getPageName();
-    if (currentPage === "index.html") {
-    this.data.startedAt = Date.now();
-    }
-    // Record pageview on load
+    ActivityTracker.instance = this;
+    this._buildWidget();
+    this._attachListeners();
     this.recordPageView();
-
-    // Render + listeners
-    this._injectBaseStylesHint(); 
-    this._render();
-    this._attachDelegatedListeners();
-
-    // Persist initial state
-    this._save();
+    this._startDurationTimer();
   }
 
-  /* -------------------------
-   * Public-ish API
-   * ------------------------- */
-
+  /** Record exactly one page view each time a document loads. */
   recordPageView() {
-    const page = this._getPageName();
-    this._recordEvent({
-      type: "pageview",
-      page,
-      details: page,
-    });
-    this._updateStats();
-    this._syncUI();
+    const page = this._pageName();
+    this._recordEvent("pageview", page, page);
   }
 
+  /** Start a new session without reloading the page. */
   resetSession() {
-    this.data = this._createNewSession();
-    this.isOpen = false;
-    this._save();
-    this._syncUI(true);
+    this.data = this._newSession();
+    this.data.ui.open = this.isOpen;
+    this._saveSession();
+    this._updateAllStats();
+    this._renderTimeline();
   }
 
+  /** Return a read-only snapshot useful for manual inspection/testing. */
   getSummary() {
-    const now = Date.now();
     return {
       sessionId: this.data.sessionId,
       startedAt: this.data.startedAt,
-      durationMs: Math.max(0, now - this.data.startedAt),
+      durationMs: Math.max(0, Date.now() - this.data.startedAt),
       stats: { ...this.data.stats },
       eventsCount: this.data.events.length,
-      lastEventAt: this.data.events.at(-1)?.time ?? this.data.startedAt,
+      lastEventAt: this.data.events.length
+        ? this.data.events[this.data.events.length - 1].time
+        : this.data.startedAt,
     };
   }
 
-  /* -------------------------
-   * Persistence
-   * ------------------------- */
-
-  _load() {
-    try {
-      const raw = localStorage.getItem(this.storageKey);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-
-  _save() {
-    try {
-      // store UI state too (open/closed)
-      this.data.ui = { open: !!this.isOpen };
-      localStorage.setItem(this.storageKey, JSON.stringify(this.data));
-    } catch {
-      // ignore storage failures (quota/private mode)
-    }
-  }
-
-  _createNewSession() {
+  /** Create a session identifier that is distinct across page loads/tabs. */
+  _newSession() {
     const now = Date.now();
-    const sessionId = `session_${now}_${Math.random().toString(16).slice(2, 8)}`;
+    let randomPart;
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+      const bytes = new Uint8Array(6);
+      crypto.getRandomValues(bytes);
+      randomPart = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    } else {
+      randomPart = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
+    }
+
     return {
-      sessionId,
+      sessionId: `session_${now}_${randomPart}`,
       startedAt: now,
       events: [],
-      stats: {
-        pageviews: 0,
-        clicks: 0,
-        forms: 0,
-      },
+      // Counters are independent of the capped timeline, so historical totals
+      // remain correct even after the oldest displayed events are removed.
+      stats: { pageviews: 0, clicks: 0, forms: 0 },
       ui: { open: false },
     };
   }
 
-  /* -------------------------
-   * Event recording + stats
-   * ------------------------- */
+  /**
+   * Validate persisted data before using it. A malformed/old storage value
+   * should never prevent the widget from loading.
+   */
+  _loadSession() {
+    try {
+      const raw = window.localStorage.getItem(this.storageKey);
+      if (!raw) return null;
+      const saved = JSON.parse(raw);
+      if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
+      if (typeof saved.sessionId !== "string" || !/^session_\d+_[a-z0-9]+$/i.test(saved.sessionId)) return null;
+      if (!Number.isFinite(saved.startedAt) || saved.startedAt <= 0
+        || saved.startedAt > Date.now() + 60_000) return null;
+      if (!Array.isArray(saved.events)) return null;
 
-  _recordEvent({ type, page, details }) {
-    const evt = {
+      const eventTypes = new Set(["pageview", "click", "form"]);
+      const events = saved.events
+        .filter((event) => event && typeof event === "object" && eventTypes.has(event.type)
+          && Number.isFinite(event.time) && event.time > 0
+          && event.time <= 8.64e15)
+        .slice(-this.maxEvents)
+        .map((event) => ({
+          type: event.type,
+          page: typeof event.page === "string" ? event.page.slice(0, 120) : "",
+          details: typeof event.details === "string" ? event.details.slice(0, 160) : "",
+          time: event.time,
+        }));
+
+      const counted = { pageviews: 0, clicks: 0, forms: 0 };
+      for (const event of events) {
+        counted[ActivityTracker.statForType[event.type]] += 1;
+      }
+      const stats = {};
+      for (const key of Object.keys(counted)) {
+        const oldValue = saved.stats && saved.stats[key];
+        stats[key] = Number.isSafeInteger(oldValue) && oldValue >= counted[key]
+          ? oldValue
+          : counted[key];
+      }
+
+      return {
+        sessionId: saved.sessionId,
+        startedAt: saved.startedAt,
+        events,
+        stats,
+        ui: { open: saved.ui?.open === true },
+      };
+    } catch (_error) {
+      // Invalid JSON, blocked storage, and disabled cookies all fall back to memory.
+      return null;
+    }
+  }
+
+  /** Persist the entire session immediately after each recorded activity. */
+  _saveSession() {
+    this.data.ui.open = this.isOpen;
+    try {
+      window.localStorage.setItem(this.storageKey, JSON.stringify(this.data));
+    } catch (_error) {
+      // Browsers can deny storage in private/restricted contexts; in-memory
+      // tracking continues without breaking the page.
+    }
+  }
+
+  /** Save and display one activity with minimal DOM work. */
+  _recordEvent(type, page, details) {
+    const event = {
       type,
-      page: page || this._getPageName(),
-      details: details || "",
+      page: page || this._pageName(),
+      details: String(details || "").slice(0, 160),
       time: Date.now(),
     };
+    this.data.events.push(event);
+    if (this.data.events.length > this.maxEvents) this.data.events.shift();
 
-    this.data.events.push(evt);
+    const key = ActivityTracker.statForType[type];
+    this.data.stats[key] += 1;
+    this._saveSession();
 
-    // Keep a reasonable cap (so localStorage doesn't explode)
-    if (this.data.events.length > this.maxEvents) {
-      this.data.events = this.data.events.slice(-this.maxEvents);
+    if (this.ui) {
+      this.ui.stats[key].textContent = String(this.data.stats[key]);
+      if (this.isOpen) {
+        if (this.timelineNeedsRefresh) this._renderTimeline();
+        else this._prependTimelineItem(event);
+      } else {
+        this.timelineNeedsRefresh = true;
+      }
     }
-
-    this._save();
   }
 
-  _updateStats() {
-    // You can do incremental stats too, but recalculating is safer.
-    const stats = { pageviews: 0, clicks: 0, forms: 0 };
-    for (const e of this.data.events) {
-      if (e.type === "pageview") stats.pageviews += 1;
-      else if (e.type === "click") stats.clicks += 1;
-      else if (e.type === "form") stats.forms += 1;
-    }
-    this.data.stats = stats;
-    this._save();
+  /** Use capture-phase delegation: one listener for all page clicks/submits. */
+  _attachListeners() {
+    document.addEventListener("click", (event) => {
+      if (!(event.target instanceof Element) || event.target.closest(".atw")) return;
+      const target = event.target.closest(
+        'button, a, input, select, textarea, [role="button"], [data-track]'
+      );
+      if (!target) return;
+      this._recordEvent("click", this._pageName(), this._describeElement(target));
+    }, true);
+
+    document.addEventListener("submit", (event) => {
+      if (!(event.target instanceof HTMLFormElement) || event.target.closest(".atw")) return;
+      const form = event.target;
+      const name = form.getAttribute("name") || form.id || "form";
+      // Do not collect entered values or personal information from the form.
+      this._recordEvent("form", this._pageName(), `${name} submitted`);
+    }, true);
+
+    // The widget's controls are intentionally not included in activity counts.
+    this.ui.root.addEventListener("click", (event) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest(".atw__toggle")) {
+        this._setTimelineOpen(!this.isOpen);
+      } else if (event.target.closest(".atw__reset")) {
+        this.resetSession();
+      }
+    });
   }
 
-  /* -------------------------
-   * Delegated listeners
-   * ------------------------- */
-
-  _attachDelegatedListeners() {
-    // Capture phase helps catch events even if something stops propagation
-    document.addEventListener(
-      "click",
-      (e) => {
-        // Don't track clicks inside the widget itself
-        if (e.target.closest(".atw")) return;
-
-        const target = e.target.closest("button, a, input, select, textarea, [role='button'], [data-track]");
-        if (!target) return;
-
-        // Optional: only track meaningful clicks
-        const label = this._describeElement(target);
-        this._recordEvent({
-          type: "click",
-          details: label,
-        });
-
-        this._updateStats();
-        this._syncUI();
-      },
-      true
-    );
-
-    document.addEventListener(
-      "submit",
-      (e) => {
-        if (e.target.closest(".atw")) return;
-
-        const form = e.target;
-        const name = form.getAttribute("name") || form.getAttribute("id") || "form";
-        const details = `${name} submitted`;
-        this._recordEvent({
-          type: "form",
-          details,
-        });
-
-        this._updateStats();
-        this._syncUI();
-      },
-      true
-    );
-  }
-
-  /* -------------------------
-   * UI rendering
-   * ------------------------- */
-
-  _render() {
-    // Create root if missing
-    let root = document.querySelector(".atw");
-    if (!root) {
-      root = document.createElement("div");
-      root.className = "atw";
-      document.body.appendChild(root);
-    }
-
+  /** Build the widget once. Markup is static; activity text uses textContent. */
+  _buildWidget() {
+    const root = document.createElement("aside");
+    root.className = "atw";
+    root.setAttribute("aria-label", "Activity Tracker");
     root.innerHTML = `
-      <div class="atw__panel ${this.isOpen ? "is-open" : "is-closed"}" aria-live="polite">
+      <section class="atw__panel">
         <div class="atw__header">
-          <div class="atw__title">
-            <span class="atw__dot" aria-hidden="true"></span>
-            Activity Tracker
-          </div>
+          <div class="atw__title"><span class="atw__dot" aria-hidden="true"></span>Activity Tracker</div>
           <div class="atw__actions">
-            <button type="button" class="atw__btn atw__toggle" aria-expanded="${this.isOpen ? "true" : "false"}">
-              ${this.isOpen ? "Hide" : "Show"}
-            </button>
-            <button type="button" class="atw__btn atw__reset" title="Reset session">
-              Reset
-            </button>
+            <button type="button" class="atw__btn atw__toggle" aria-controls="atw-timeline-wrap">Show</button>
+            <button type="button" class="atw__btn atw__reset" title="Reset session">Reset</button>
           </div>
         </div>
-
-        <div class="atw__stats">
+        <div class="atw__stats" aria-label="Activity statistics">
           <div class="atw__stat"><span class="atw__statLabel">Pages</span><span class="atw__statValue" data-atw-stat="pageviews">0</span></div>
           <div class="atw__stat"><span class="atw__statLabel">Clicks</span><span class="atw__statValue" data-atw-stat="clicks">0</span></div>
           <div class="atw__stat"><span class="atw__statLabel">Forms</span><span class="atw__statValue" data-atw-stat="forms">0</span></div>
           <div class="atw__stat"><span class="atw__statLabel">Duration</span><span class="atw__statValue" data-atw-stat="duration">0s</span></div>
         </div>
-
-        <div class="atw__timelineWrap ${this.isOpen ? "" : "atw__hidden"}">
+        <div class="atw__timelineWrap atw__hidden" id="atw-timeline-wrap" hidden>
           <div class="atw__timeline" role="list" aria-label="Activity timeline"></div>
         </div>
-      </div>
-    `;
+      </section>`;
+    document.body.appendChild(root);
 
     this.ui = {
       root,
       panel: root.querySelector(".atw__panel"),
-      toggleBtn: root.querySelector(".atw__toggle"),
-      resetBtn: root.querySelector(".atw__reset"),
+      toggle: root.querySelector(".atw__toggle"),
       timelineWrap: root.querySelector(".atw__timelineWrap"),
       timeline: root.querySelector(".atw__timeline"),
-      statsEls: {
+      stats: {
         pageviews: root.querySelector('[data-atw-stat="pageviews"]'),
         clicks: root.querySelector('[data-atw-stat="clicks"]'),
         forms: root.querySelector('[data-atw-stat="forms"]'),
         duration: root.querySelector('[data-atw-stat="duration"]'),
       },
     };
-
-    // Widget internal controls (not part of event delegation requirement; this is inside widget)
-    this.ui.toggleBtn.addEventListener("click", () => {
-      this.isOpen = !this.isOpen;
-      this._save();
-      this._syncUI(true);
-    });
-
-    this.ui.resetBtn.addEventListener("click", () => {
-      this.resetSession();
-    });
-
-    // Initial UI sync
-    this._syncUI(true);
-
-    // Update duration every second
-    this._startDurationTicker();
+    this._updateAllStats();
+    this._setTimelineOpen(this.isOpen, false);
   }
 
-  _syncUI(forceRerenderTimeline = false) {
-    if (!this.ui) return;
-
-    // Stats
-    const { pageviews, clicks, forms } = this.data.stats || { pageviews: 0, clicks: 0, forms: 0 };
-    this.ui.statsEls.pageviews.textContent = String(pageviews);
-    this.ui.statsEls.clicks.textContent = String(clicks);
-    this.ui.statsEls.forms.textContent = String(forms);
-    this.ui.statsEls.duration.textContent = this._formatDuration(Date.now() - this.pageStartTime);
-
-    // Toggle open/close
-    this.ui.toggleBtn.textContent = this.isOpen ? "Hide" : "Show";
-    this.ui.toggleBtn.setAttribute("aria-expanded", this.isOpen ? "true" : "false");
-
-    if (this.isOpen) {
-      this.ui.timelineWrap.classList.remove("atw__hidden");
-      this.ui.panel.classList.add("is-open");
-      this.ui.panel.classList.remove("is-closed");
-    } else {
-      this.ui.timelineWrap.classList.add("atw__hidden");
-      this.ui.panel.classList.add("is-closed");
-      this.ui.panel.classList.remove("is-open");
-    }
-
-    // Timeline
-    if (this.isOpen && (forceRerenderTimeline || true)) {
-      this._renderTimeline();
-    }
+  /** Only regenerate timeline when opened or reset. */
+  _setTimelineOpen(open, persist = true) {
+    this.isOpen = Boolean(open);
+    this.ui.panel.classList.toggle("is-open", this.isOpen);
+    this.ui.panel.classList.toggle("is-closed", !this.isOpen);
+    this.ui.timelineWrap.hidden = !this.isOpen;
+    this.ui.timelineWrap.classList.toggle("atw__hidden", !this.isOpen);
+    this.ui.toggle.textContent = this.isOpen ? "Hide" : "Show";
+    this.ui.toggle.setAttribute("aria-expanded", String(this.isOpen));
+    if (this.isOpen && this.timelineNeedsRefresh) this._renderTimeline();
+    if (persist) this._saveSession();
   }
 
+  /** Use a DocumentFragment to batch additions and avoid innerHTML injection. */
   _renderTimeline() {
-    if (!this.ui?.timeline) return;
-
-    const events = this.data.events || [];
-    const last = events.slice(-50).reverse(); // show latest 50
-
-    this.ui.timeline.innerHTML = last
-      .map((e) => {
-        const time = this._formatTime(e.time);
-        const type = this._escapeHtml(e.type);
-        const page = this._escapeHtml(e.page || "");
-        const details = this._escapeHtml(e.details || "");
-        return `
-          <div class="atw__event" role="listitem">
-            <div class="atw__eventTime">${time}</div>
-            <div class="atw__eventBody">
-              <div class="atw__eventType">${type}</div>
-              <div class="atw__eventMeta">${page}${details ? " — " + details : ""}</div>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
+    const fragment = document.createDocumentFragment();
+    const latest = this.data.events.slice(-this.visibleEvents).reverse();
+    for (const event of latest) fragment.appendChild(this._makeTimelineItem(event));
+    this.ui.timeline.replaceChildren(fragment);
+    this.timelineNeedsRefresh = false;
   }
 
-  _startDurationTicker() {
-    if (this._durationTimer) return;
-    this._durationTimer = setInterval(() => {
-      if (!this.ui) return;
-      this.ui.statsEls.duration.textContent = this._formatDuration(Date.now() - this.pageStartTime);
-    }, 1000);
-  }
-
-  /* -------------------------
-   * Helpers
-   * ------------------------- */
-
-  _getPageName() {
-    // "index.html" / "products.html" etc.
-    const path = window.location.pathname || "";
-    const file = path.split("/").filter(Boolean).pop();
-    return file || "index.html";
-  }
-
-  _describeElement(el) {
-    const tag = el.tagName.toLowerCase();
-    const id = el.id ? `#${el.id}` : "";
-    const cls = el.className && typeof el.className === "string"
-      ? "." + el.className.trim().split(/\s+/).slice(0, 2).join(".")
-      : "";
-
-    let text = "";
-    if (tag === "input" || tag === "textarea" || tag === "select") {
-      text = el.getAttribute("name") || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.type || "";
-    } else {
-      text = (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
-    }
-
-    const href = el.tagName.toLowerCase() === "a" ? el.getAttribute("href") : "";
-    const track = el.getAttribute("data-track");
-
-    const parts = [
-      `${tag}${id}${cls}`,
-      track ? `track:${track}` : "",
-      href ? `href:${href}` : "",
-      text ? `label:${text}` : "",
-    ].filter(Boolean);
-
-    return parts.join(" | ");
-  }
-
-  _formatTime(ms) {
-    try {
-      return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    } catch {
-      return String(ms);
+  /** Constant-time incremental rendering while the timeline is visible. */
+  _prependTimelineItem(event) {
+    this.ui.timeline.prepend(this._makeTimelineItem(event));
+    if (this.ui.timeline.childElementCount > this.visibleEvents) {
+      this.ui.timeline.lastElementChild.remove();
     }
   }
 
-  _formatDuration(ms) {
-    const totalSec = Math.max(0, Math.floor(ms / 1000));
-    const h = Math.floor(totalSec / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
+  _makeTimelineItem(event) {
+    const item = document.createElement("div");
+    item.className = "atw__event";
+    item.setAttribute("role", "listitem");
 
-    if (h > 0) return `${h}h ${m}m ${s}s`;
-    if (m > 0) return `${m}m ${s}s`;
-    return `${s}s`;
+    const time = document.createElement("time");
+    time.className = "atw__eventTime";
+    time.dateTime = new Date(event.time).toISOString();
+    time.textContent = new Date(event.time).toLocaleTimeString([], {
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+
+    const body = document.createElement("div");
+    body.className = "atw__eventBody";
+    const type = document.createElement("div");
+    type.className = "atw__eventType";
+    type.textContent = event.type;
+    const details = document.createElement("div");
+    details.className = "atw__eventMeta";
+    details.textContent = [event.page, event.details].filter(Boolean).join(" — ");
+    body.append(type, details);
+    item.append(time, body);
+    return item;
   }
 
-  _escapeHtml(str) {
-    return String(str)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#39;");
+  _updateAllStats() {
+    for (const key of ["pageviews", "clicks", "forms"]) {
+      this.ui.stats[key].textContent = String(this.data.stats[key]);
+    }
+    this._updateDuration();
   }
 
-  _injectBaseStylesHint() {
+  _updateDuration() {
+    this.ui.stats.duration.textContent = this._formatDuration(Date.now() - this.data.startedAt);
+  }
 
-    if (document.getElementById("atw-fallback-style")) return;
-    const style = document.createElement("style");
-    style.id = "atw-fallback-style";
-    style.textContent = `
-      .atw{position:fixed;right:16px;bottom:16px;z-index:9999;font-family:system-ui,Arial,sans-serif}
-      .atw__panel{width:320px;max-width:calc(100vw - 32px);background:#111;color:#fff;border-radius:12px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.25)}
-      .atw__header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12)}
-      .atw__title{display:flex;gap:8px;align-items:center;font-weight:600}
-      .atw__dot{width:10px;height:10px;border-radius:999px;background:#4ade80}
-      .atw__btn{background:rgba(255,255,255,.12);border:0;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer}
-      .atw__actions{display:flex;gap:8px}
-      .atw__stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:10px 12px}
-      .atw__stat{background:rgba(255,255,255,.08);border-radius:10px;padding:8px}
-      .atw__statLabel{display:block;font-size:11px;opacity:.8}
-      .atw__statValue{display:block;font-size:14px;font-weight:700}
-      .atw__timelineWrap{max-height:260px;overflow:auto;border-top:1px solid rgba(255,255,255,.12)}
-      .atw__hidden{display:none}
-      .atw__event{display:flex;gap:10px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.08)}
-      .atw__eventTime{font-size:11px;opacity:.8;min-width:72px}
-      .atw__eventType{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
-      .atw__eventMeta{font-size:12px;opacity:.9;word-break:break-word}
-    `;
-    document.head.appendChild(style);
+  _startDurationTimer() {
+    if (this.durationTimer !== null) return;
+    this.durationTimer = window.setInterval(() => this._updateDuration(), 1000);
+  }
+
+  _pageName() {
+    const path = window.location.pathname.split("/").filter(Boolean);
+    return path[path.length - 1] || "index.html";
+  }
+
+  _describeElement(element) {
+    const tag = element.tagName.toLowerCase();
+    const id = element.id ? `#${element.id}` : "";
+    const tracked = element.getAttribute("data-track");
+    let label = (element.getAttribute("aria-label")
+      || (tag === "input" || tag === "textarea" || tag === "select"
+        ? (element.getAttribute("name") || element.getAttribute("placeholder"))
+        : element.textContent)
+      || "").trim().replace(/\s+/g, " ").slice(0, 90);
+    if (!label) label = element.getAttribute("title") || element.getAttribute("type") || "";
+    return [tag + id, tracked ? `track:${tracked}` : "", label ? `label:${label}` : ""]
+      .filter(Boolean).join(" | ");
+  }
+
+  _formatDuration(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remaining = seconds % 60;
+    if (hours) return `${hours}h ${minutes}m ${remaining}s`;
+    if (minutes) return `${minutes}m ${remaining}s`;
+    return `${remaining}s`;
   }
 }
 
+ActivityTracker.instance = null;
+ActivityTracker.statForType = Object.freeze({
+  pageview: "pageviews", click: "clicks", form: "forms",
+});
 
-document.addEventListener("DOMContentLoaded", () => new ActivityTracker());
+// Keep compatibility with the unmodified demo HTML's existing constructors.
+if (typeof window !== "undefined") window.ActivityTracker = ActivityTracker;
+if (typeof module !== "undefined" && module.exports) module.exports = ActivityTracker;
 
-// Export the class
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = ActivityTracker;
-} else {
-  window.ActivityTracker = ActivityTracker;
+// Instantiation is required on DOMContentLoaded. Also supports late script loads.
+if (typeof document !== "undefined") {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => new ActivityTracker(), { once: true });
+  } else {
+    new ActivityTracker();
+  }
 }
